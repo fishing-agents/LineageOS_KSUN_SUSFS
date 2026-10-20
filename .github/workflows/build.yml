@@ -1,0 +1,260 @@
+name: Build salami KSUN + SUSFS kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: LineageOS kernel branch/commit
+        default: lineage-24.0
+      ksun_ref:
+        description: KernelSU-Next branch/tag/commit (empty = setup.sh default)
+        default: ""
+      susfs_ref:
+        description: susfs4ksu branch/commit
+        default: gki-android13-5.15
+      release:
+        description: Publish a GitHub release
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: [".github/workflows/build.yml"]
+
+env:
+  KERNEL_REPO: https://github.com/LineageOS/android_kernel_oneplus_sm8550
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz
+  LOS_API: https://download.lineageos.org/api/v2/devices/salami/builds
+  # LineageOS BoardConfigCommon.mk TARGET_KERNEL_CONFIG
+  DEFCONFIGS: gki_defconfig vendor/kalama_GKI.config vendor/oplus/kalama_GKI.config vendor/debugfs.config
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install host deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev dwarves cpio lz4 zip unzip ccache jq python3 rsync
+
+      - name: Fetch stock LineageOS boot.img
+        id: stock
+        run: |
+          mkdir -p stock && cd stock
+          curl -fsSL "$LOS_API" -o builds.json
+          url=$(jq -r '.[0].files[] | select(.filename=="boot.img") | .url' builds.json)
+          sha=$(jq -r '.[0].files[] | select(.filename=="boot.img") | .sha256' builds.json)
+          date=$(jq -r '.[0].date' builds.json)
+          curl -fsSL "$url" -o boot.img
+          echo "$sha  boot.img" | sha256sum -c
+          echo "date=$date" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch magiskboot
+        run: |
+          tag=$(curl -fsSL https://api.github.com/repos/topjohnwu/Magisk/releases/latest -H "Authorization: Bearer ${{ github.token }}" | jq -r .tag_name)
+          curl -fsSL "https://github.com/topjohnwu/Magisk/releases/download/$tag/Magisk-$tag.apk" -o magisk.apk
+          unzip -o -j magisk.apk lib/x86_64/libmagiskboot.so -d tools
+          mv tools/libmagiskboot.so tools/magiskboot && chmod +x tools/magiskboot
+          echo "$PWD/tools" >> "$GITHUB_PATH"
+
+      - name: Read stock kernel release
+        id: rel
+        run: |
+          mkdir -p stock/unpack && cd stock/unpack
+          magiskboot unpack ../boot.img
+          ls -la
+          # kernel may be raw Image or compressed; magiskboot decompresses on unpack
+          banner=$(strings kernel | grep -m1 '^Linux version ')
+          echo "$banner"
+          rel=$(echo "$banner" | awk '{print $3}')
+          echo "release=$rel" >> "$GITHUB_OUTPUT"
+
+      - name: Clone kernel
+        run: |
+          git clone --depth 1 -b "${{ inputs.kernel_ref || 'lineage-24.0' }}" "$KERNEL_REPO" kernel
+          cd kernel && echo "KERNEL_SHA=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+
+      - name: Fetch clang r450784e
+        run: |
+          mkdir -p clang && curl -fsSL "$CLANG_URL" | tar -xz -C clang
+          echo "$PWD/clang/bin" >> "$GITHUB_PATH"
+          clang/bin/clang --version
+
+      - name: Fetch SUSFS and Wild kernel_patches
+        run: |
+          git clone --depth 1 -b "${{ inputs.susfs_ref || 'gki-android13-5.15' }}" https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+          git clone --depth 1 https://github.com/WildKernels/kernel_patches.git kernel_patches
+          echo "SUSFS_SHA=$(git -C susfs4ksu rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Add KernelSU Next
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          ref="${{ inputs.ksun_ref }}"
+          curl -fsSL https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh -o /tmp/ksun-setup.sh
+          if [ -z "$ref" ]; then bash /tmp/ksun-setup.sh; else bash /tmp/ksun-setup.sh "$ref"; fi
+          cd KernelSU-Next
+          git fetch --unshallow 2>/dev/null || true
+          count=$(git rev-list --count HEAD)
+          if [ "$count" -lt 2684 ]; then base=10200; else base=30000; fi
+          ver=$((count + base))
+          sed -i "s/DKSU_VERSION=11998/DKSU_VERSION=${ver}/" kernel/Makefile || true
+          echo "KSUVER=$ver" >> "$GITHUB_ENV"
+          echo "KSUN_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "KernelSU Next version $ver"
+
+      - name: Apply SUSFS
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          SUSFS=$GITHUB_WORKSPACE/susfs4ksu
+          KP=$GITHUB_WORKSPACE/kernel_patches
+          cp "$SUSFS/kernel_patches/fs/"* fs/
+          cp "$SUSFS/kernel_patches/include/linux/"* include/linux/
+          v=$(grep '#define SUSFS_VERSION' include/linux/susfs.h | awk -F'"' '{print $2}')
+          echo "SUSVER=$v" >> "$GITHUB_ENV"
+          echo "SUSFS $v"
+
+          # KernelSU-Next side (mirrors WildKernels build-kernel action)
+          pushd KernelSU-Next
+          patch -p1 --forward < "$SUSFS/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+          fixdir="$KP/next/susfs_fix_patches/$v"
+          case "$v" in
+            v1.5.9|v1.5.10|v1.5.11|v1.5.12)
+              for f in $(find ./kernel -maxdepth 2 -name '*.rej' -printf '%f\n' | cut -d. -f1); do
+                patch -p1 --forward < "$fixdir/fix_$f.c.patch"; done
+              patch -p1 --forward < "$fixdir/fix_kernel_compat.c.patch" ;;
+            v2.*)
+              for f in $(find ./kernel -maxdepth 2 -name '*.rej' -exec basename {} .rej \;); do
+                patch -p1 --forward < "$fixdir/fix_$f.patch"; done
+              patch -p1 --forward < "$fixdir/overwrite_hook_mode.patch"
+              patch -p1 --forward < "$fixdir/ksu_toolkit.patch"
+              if [ "$v" = v2.0.0 ] || [ "$v" = v2.1.0 ]; then
+                [ "$KSUVER" -le 33095 ] && patch -p1 --forward < "$fixdir/multi_manager.patch"
+                if [ "$KSUVER" -ge 33068 ] && [ "$KSUVER" -lt 33070 ]; then
+                  patch -p1 --forward < "$fixdir/multi_sepolicy_fix.patch"; fi
+              fi ;;
+            *) echo "::error::Unsupported SUSFS version $v"; exit 1 ;;
+          esac
+          find . -name '*.rej' -delete; find . -name '*.orig' -delete
+          popd
+
+          # kernel side
+          patch -p1 --forward < "$SUSFS/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
+          if grep -q 'VMA_PAD_START(' fs/proc/task_mmu.c && ! grep -qE '#include <linux/pgsize_migration(_inline)?\.h>|define VMA_PAD_START' fs/proc/task_mmu.c; then
+            sed -i '\|#include "internal.h"|a\\n#ifndef VMA_PAD_START\n#define VMA_PAD_START(vma) ((vma)->vm_end)\n#endif' fs/proc/task_mmu.c
+          fi
+          if [ -n "$(find . -name '*.rej')" ]; then find . -name '*.rej' -exec sh -c 'echo "== $1"; cat "$1"' _ {} \; ; exit 1; fi
+
+          # susfs <= 1.5.12 needs manual hooks
+          if [ "$(printf '%s\n' "${v#v}" 1.5.12 | sort -V | head -n1)" = "${v#v}" ]; then
+            patch -p1 < "$KP/next/scope_min_manual_hooks_v1.4.patch"; fi
+          # 5.15 < 5.16: ptrace fix
+          patch -p1 -F 3 < "$KP/gki_ptrace.patch"
+
+      - name: Kernel config fragments
+        working-directory: kernel
+        run: |
+          cat >> arch/arm64/configs/gki_defconfig <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_KSU_KPROBES_HOOK=n
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          CONFIG_KSU_SUSFS_SUS_SU=n
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          EOF
+          # Let LineageOS-signed vendor modules keep loading against our Image
+          rm -f android/abi_gki_protected_exports_* || true
+          # Match stock kernel release so vendor_dlkm modules (vermagic) still load
+          rel="${{ steps.rel.outputs.release }}"
+          base=$(make -s kernelversion)
+          suffix="${rel#$base}"
+          echo "stock release=$rel base=$base suffix=$suffix"
+          printf '#!/bin/sh\necho "%s"\n' "$suffix" > scripts/setlocalversion
+          chmod +x scripts/setlocalversion
+
+      - name: Build
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          M="make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang -j$(nproc)"
+          $M $DEFCONFIGS
+          grep -E '^CONFIG_(KSU|KSU_SUSFS)=' out/.config
+          $M Image
+          strings out/arch/arm64/boot/Image | grep -m1 '^Linux version '
+
+      - name: Repack boot.img
+        run: |
+          set -euo pipefail
+          mkdir -p out work && cd work
+          cp ../stock/boot.img .
+          magiskboot unpack boot.img
+          cp ../kernel/out/arch/arm64/boot/Image kernel
+          magiskboot repack boot.img ../out/boot.img
+          cd ..
+          ls -la out
+
+      - name: AnyKernel3 zip
+        run: |
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3 ak3
+          rm -rf ak3/.git ak3/modules ak3/patch ak3/ramdisk ak3/README.md
+          sed -i \
+            -e 's/^kernel.string=.*/kernel.string=salami LineageOS 24.0 KSUN + SUSFS/' \
+            -e 's/^do.devicecheck=.*/do.devicecheck=1/' \
+            -e 's/^device.name1=.*/device.name1=salami/' \
+            -e 's/^device.name2=.*/device.name2=OP591BL1/' \
+            -e 's/^device.name3=.*/device.name3=OP594DL1/' \
+            -e 's/^device.name4=.*/device.name4=/' -e 's/^device.name5=.*/device.name5=/' \
+            -e 's/^supported.versions=.*/supported.versions=/' \
+            -e 's|^BLOCK=.*|BLOCK=boot;|' -e 's/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/' \
+            ak3/anykernel.sh
+          cp kernel/out/arch/arm64/boot/Image ak3/
+          name="AK3_salami_LOS24_KSUN${KSUVER}_SUSFS${SUSVER}_${{ steps.stock.outputs.date }}.zip"
+          (cd ak3 && zip -r9 "../out/$name" .)
+          echo "ZIP_NAME=$name" >> "$GITHUB_ENV"
+          cat > out/info.txt <<EOF
+          device: OnePlus 11 (salami)
+          lineageos stock boot.img date: ${{ steps.stock.outputs.date }}
+          kernel release: ${{ steps.rel.outputs.release }}
+          kernel commit: $KERNEL_SHA
+          KernelSU-Next: $KSUVER ($KSUN_SHA)
+          SUSFS: $SUSVER ($SUSFS_SHA)
+          EOF
+          cat out/info.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: salami-ksun-susfs-${{ steps.stock.outputs.date }}
+          path: out/
+
+      - name: Release
+        if: ${{ inputs.release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="los24-${{ steps.stock.outputs.date }}-ksun${KSUVER}-susfs${SUSVER}-${{ github.run_number }}"
+          gh release create "$tag" out/* --title "$tag" --notes-file out/info.txt
