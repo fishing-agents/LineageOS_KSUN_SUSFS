@@ -7,8 +7,8 @@ on:
         description: LineageOS kernel branch/commit
         default: lineage-24.0
       ksun_ref:
-        description: KernelSU-Next branch/tag/commit (empty = setup.sh default)
-        default: ""
+        description: KernelSU-Next branch/tag/commit (WildKernels uses dev)
+        default: dev
       susfs_ref:
         description: susfs4ksu branch/commit
         default: gki-android13-5.15
@@ -99,7 +99,7 @@ jobs:
         working-directory: kernel
         run: |
           set -euo pipefail
-          ref="${{ inputs.ksun_ref }}"
+          ref="${{ inputs.ksun_ref || 'dev' }}"
           curl -fsSL https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh -o /tmp/ksun-setup.sh
           if [ -z "$ref" ]; then bash /tmp/ksun-setup.sh; else bash /tmp/ksun-setup.sh "$ref"; fi
           cd KernelSU-Next
