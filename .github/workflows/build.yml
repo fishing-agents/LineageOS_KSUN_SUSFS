@@ -81,6 +81,9 @@ jobs:
       - name: Clone kernel
         run: |
           git clone --depth 1 -b "${{ inputs.kernel_ref || 'lineage-24.0' }}" "$KERNEL_REPO" kernel
+          # kernel/oplus_cpu/thermal symlinks into ../sm8550-modules (LineageOS tree layout)
+          git clone --depth 1 -b lineage-24.0 https://github.com/LineageOS/android_kernel_oneplus_sm8550-modules sm8550-modules
+          test -e kernel/kernel/oplus_cpu/thermal/Kconfig
           cd kernel && echo "KERNEL_SHA=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
 
       - name: Fetch clang r450784e
