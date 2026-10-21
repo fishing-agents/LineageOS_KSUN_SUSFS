@@ -196,6 +196,9 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_SU=n
           CONFIG_TMPFS_XATTR=y
           CONFIG_TMPFS_POSIX_ACL=y
+          # full LTO gets killed on hosted runners; ThinLTO links in far less RAM
+          CONFIG_LTO_CLANG_FULL=n
+          CONFIG_LTO_CLANG_THIN=y
           EOF
           # Let LineageOS-signed vendor modules keep loading against our Image
           rm -f android/abi_gki_protected_exports_* || true
@@ -213,7 +216,8 @@ jobs:
           set -euo pipefail
           M="make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang -j$(nproc)"
           $M $DEFCONFIGS
-          grep -E '^CONFIG_(KSU|KSU_SUSFS)=' out/.config
+          grep -E '^CONFIG_(KSU|KSU_SUSFS|LTO_CLANG_THIN|LTO_CLANG_FULL)=' out/.config || true
+          grep -q '^CONFIG_LTO_CLANG_THIN=y' out/.config
           $M Image
           strings out/arch/arm64/boot/Image | grep -m1 '^Linux version '
 
