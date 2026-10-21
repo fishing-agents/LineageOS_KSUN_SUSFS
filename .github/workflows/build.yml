@@ -150,7 +150,13 @@ jobs:
           popd
 
           # kernel side
+          # LineageOS/OPlus trees carry extra vendor-hook includes inside SUSFS hunk context.
+          # Drop them, patch, then put them back.
+          sed -i '\|^#include <trace/hooks/blk.h>$|d' fs/namespace.c
+          sed -i '\|^#include <trace/hooks/mm.h>$|d' fs/proc/task_mmu.c
           patch -p1 --forward < "$SUSFS/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
+          sed -i '0,\|^#include "internal.h"$|s||#include "internal.h"\n#include <trace/hooks/blk.h>|' fs/namespace.c
+          sed -i '0,\|^#include <linux/pkeys.h>$|s||#include <linux/pkeys.h>\n#include <trace/hooks/mm.h>|' fs/proc/task_mmu.c
           if grep -q 'VMA_PAD_START(' fs/proc/task_mmu.c && ! grep -qE '#include <linux/pgsize_migration(_inline)?\.h>|define VMA_PAD_START' fs/proc/task_mmu.c; then
             sed -i '\|#include "internal.h"|a\\n#ifndef VMA_PAD_START\n#define VMA_PAD_START(vma) ((vma)->vm_end)\n#endif' fs/proc/task_mmu.c
           fi
