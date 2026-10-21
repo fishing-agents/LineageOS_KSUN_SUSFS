@@ -15,7 +15,7 @@ on:
       release:
         description: Publish a GitHub release
         type: boolean
-        default: false
+        default: true
   push:
     branches: [main]
     paths: [".github/workflows/build.yml"]
@@ -273,7 +273,7 @@ jobs:
           path: out/
 
       - name: Release
-        if: ${{ inputs.release }}
+        if: ${{ github.event_name == 'push' || inputs.release }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
