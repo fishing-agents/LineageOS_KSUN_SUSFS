@@ -73,9 +73,10 @@ jobs:
           magiskboot unpack ../boot.img
           ls -la
           # kernel may be raw Image or compressed; magiskboot decompresses on unpack
-          banner=$(strings kernel | grep -m1 '^Linux version ')
+          banner=$(strings kernel | grep -m1 -E '^Linux version [0-9]+\.[0-9]+')
           echo "$banner"
           rel=$(echo "$banner" | awk '{print $3}')
+          [ -n "$rel" ] && [ "$rel" != "%s" ] || { echo "::error::could not read stock kernel release"; exit 1; }
           echo "release=$rel" >> "$GITHUB_OUTPUT"
 
       - name: Clone kernel
@@ -199,6 +200,9 @@ jobs:
           # full LTO gets killed on hosted runners; ThinLTO links in far less RAM
           CONFIG_LTO_CLANG_FULL=n
           CONFIG_LTO_CLANG_THIN=y
+          # release string comes entirely from scripts/setlocalversion (stock match)
+          CONFIG_LOCALVERSION=""
+          CONFIG_LOCALVERSION_AUTO=n
           EOF
           # Let LineageOS-signed vendor modules keep loading against our Image
           rm -f android/abi_gki_protected_exports_* || true
@@ -219,7 +223,10 @@ jobs:
           grep -E '^CONFIG_(KSU|KSU_SUSFS|LTO_CLANG_THIN|LTO_CLANG_FULL)=' out/.config || true
           grep -q '^CONFIG_LTO_CLANG_THIN=y' out/.config
           $M Image
-          strings out/arch/arm64/boot/Image | grep -m1 '^Linux version '
+          strings out/arch/arm64/boot/Image | grep -m1 -E '^Linux version [0-9]+\.[0-9]+'
+          ours=$(cat out/include/config/kernel.release)
+          echo "built=$ours stock=${{ steps.rel.outputs.release }}"
+          [ "$ours" = "${{ steps.rel.outputs.release }}" ] || { echo "::error::kernel release mismatch; vendor modules would fail to load"; exit 1; }
 
       - name: Repack boot.img
         run: |
