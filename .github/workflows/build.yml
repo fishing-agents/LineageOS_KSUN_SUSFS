@@ -10,8 +10,8 @@ on:
         description: KernelSU-Next ref (default = commit WildKernels fix patches target; 33388)
         default: 4cb8ee68fb9e8efb1ca37501c08eb57ded6c3c62
       susfs_ref:
-        description: susfs4ksu branch/commit
-        default: gki-android13-5.15
+        description: susfs4ksu commit/branch (default = rev matching Wild v2.3.0 fix patches)
+        default: 2ad297356931ba06b4edc0860f42fdd143b02ffd
       release:
         description: Publish a GitHub release
         type: boolean
@@ -91,7 +91,8 @@ jobs:
 
       - name: Fetch SUSFS and Wild kernel_patches
         run: |
-          git clone --depth 1 -b "${{ inputs.susfs_ref || 'gki-android13-5.15' }}" https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+          git clone -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+          git -C susfs4ksu checkout "${{ inputs.susfs_ref || '2ad297356931ba06b4edc0860f42fdd143b02ffd' }}"
           git clone --depth 1 https://github.com/WildKernels/kernel_patches.git kernel_patches
           echo "SUSFS_SHA=$(git -C susfs4ksu rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
