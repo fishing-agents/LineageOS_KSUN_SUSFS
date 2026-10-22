@@ -69,6 +69,10 @@ Newer KernelSU Next moves SUSFS into a separately loaded module, which these in-
 
 Fork, then go to **Actions → Build salami KSUN + SUSFS kernel → Run workflow**. The output appears as a release in your fork.
 
+## Troubleshooting
+
+Play Integrity failing? See [docs/play-integrity-debug.md](docs/play-integrity-debug.md).
+
 ## Disclaimer
 
 Unofficial build, not affiliated with LineageOS or OnePlus. Unlocked bootloader required. Keep the stock `boot.img` so you can roll back.
