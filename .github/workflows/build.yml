@@ -19,9 +19,16 @@ on:
       lkm_tag:
         description: KernelSU-Next release used for the LKM init_boot.img (ksud + built-in kernelsu.ko)
         default: latest
+      force:
+        description: Rebuild even if a release for the latest LineageOS build exists
+        type: boolean
+        default: true
   push:
     branches: [main]
     paths: [".github/workflows/build.yml"]
+  schedule:
+    # every 6 hours; builds only when LineageOS published a newer salami build
+    - cron: "17 */6 * * *"
 
 env:
   KERNEL_REPO: https://github.com/LineageOS/android_kernel_oneplus_sm8550
@@ -34,7 +41,28 @@ permissions:
   contents: write
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.c.outputs.build }}
+    steps:
+      - id: c
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          date=$(curl -fsSL "$LOS_API" | jq -r '.[0].date')
+          echo "latest LineageOS build: $date"
+          if [ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ inputs.force }}" = true ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if gh release list -R "$GITHUB_REPOSITORY" -L 100 --json tagName -q '.[].tagName' | grep -q "^los24-$date-"; then
+            echo "already released for $date"; echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -307,7 +335,7 @@ jobs:
           path: out/
 
       - name: Release
-        if: ${{ github.event_name == 'push' || inputs.release }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.release }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
