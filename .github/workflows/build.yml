@@ -104,7 +104,9 @@ jobs:
         run: |
           git clone -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
           git -C susfs4ksu checkout "${{ inputs.susfs_ref || '2ad297356931ba06b4edc0860f42fdd143b02ffd' }}"
-          git clone --depth 1 https://github.com/WildKernels/kernel_patches.git kernel_patches
+          # pinned: fix patches matching KSUN 33388 (4cb8ee68); newer commits target newer KSUN
+          git clone https://github.com/WildKernels/kernel_patches.git kernel_patches
+          git -C kernel_patches checkout 44b23a7601
           echo "SUSFS_SHA=$(git -C susfs4ksu rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
       - name: Add KernelSU Next
