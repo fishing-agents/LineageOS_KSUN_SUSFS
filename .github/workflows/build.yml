@@ -16,6 +16,9 @@ on:
         description: Publish a GitHub release
         type: boolean
         default: true
+      lkm_tag:
+        description: KernelSU-Next release used for the LKM init_boot.img (ksud + built-in kernelsu.ko)
+        default: latest
   push:
     branches: [main]
     paths: [".github/workflows/build.yml"]
@@ -56,6 +59,10 @@ jobs:
           date=$(jq -r '.[0].date' builds.json)
           curl -fsSL "$url" -o boot.img
           echo "$sha  boot.img" | sha256sum -c
+          url=$(jq -r '.[0].files[] | select(.filename=="init_boot.img") | .url' builds.json)
+          sha=$(jq -r '.[0].files[] | select(.filename=="init_boot.img") | .sha256' builds.json)
+          curl -fsSL "$url" -o init_boot.img
+          echo "$sha  init_boot.img" | sha256sum -c
           echo "date=$date" >> "$GITHUB_OUTPUT"
 
       - name: Fetch magiskboot
@@ -239,6 +246,26 @@ jobs:
           cd ..
           ls -la out
 
+      - name: LKM init_boot.img (stock kernel + kernelsu.ko)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.lkm_tag || 'latest' }}"
+          if [ "$tag" = latest ]; then
+            tag=$(gh release view -R KernelSU-Next/KernelSU-Next --json tagName -q .tagName)
+          fi
+          mkdir -p lkm && cd lkm
+          gh release download "$tag" -R KernelSU-Next/KernelSU-Next -p 'ksud-x86_64-unknown-linux-musl' -O ksud
+          chmod +x ksud
+          ./ksud boot-patch --help >/dev/null
+          # salami is android13-5.15 KMI; ksud embeds the matching kernelsu.ko + ksuinit
+          ./ksud boot-patch -b ../stock/init_boot.img --kmi android13-5.15 --out . --out-name init_boot.img
+          test -s init_boot.img
+          cp init_boot.img ../out/init_boot.img
+          echo "LKM_TAG=$tag" >> "$GITHUB_ENV"
+          ls -la ../out
+
       - name: AnyKernel3 zip
         run: |
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3 ak3
@@ -264,6 +291,11 @@ jobs:
           kernel commit: $KERNEL_SHA
           KernelSU-Next: $KSUVER ($KSUN_SHA)
           SUSFS: $SUSVER ($SUSFS_SHA)
+
+          Two independent options. Flash ONE of them, not both:
+          A) boot.img / AK3 zip: KernelSU Next + SUSFS built into the kernel. Keep stock init_boot.
+          B) init_boot.img: LKM mode, KernelSU Next $LKM_TAG kernelsu.ko on the stock LineageOS kernel.
+             Keep stock boot.img. No SUSFS in this mode.
           EOF
           cat out/info.txt
 
